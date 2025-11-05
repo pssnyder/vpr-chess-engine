@@ -16,7 +16,7 @@ from typing import Optional, Dict, List, Tuple
 # Add src directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from vpr import VPREngine
+from vpr_engine import VPREngine
 
 class EngineComparison:
     def __init__(self, v7p3r_path: str):

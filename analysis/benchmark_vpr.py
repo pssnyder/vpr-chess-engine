@@ -10,7 +10,7 @@ import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from vpr import VPREngine
+from vpr_engine import VPREngine
 
 def benchmark_piece_priorities():
     """Benchmark the piece priority calculation"""
