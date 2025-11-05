@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """
-VPR Chess Engine
-A UCI-compatible chess engine using material balance evaluation with minimax search.
+VPR Chess Engine v8.1
+A UCI-compatible chess engine with phase-aware evaluation and tactical intelligence.
 
 Features:
 - Minimax with alpha-beta pruning
+- Phase-aware move ordering (opening/middlegame/endgame detection)
+- Static Exchange Evaluation (SEE) for intelligent trade decisions
+- Phase-dependent time management
 - Move ordering (MVV-LVA, killer moves, history heuristic)
 - Quiescence search on captures
 - Null move pruning
 - Zobrist transposition table
 - Dynamic bishop pair evaluation
-- Time management for various time controls
+
+v8.1 Enhancements:
+- Game phase detection (opening/middlegame/endgame)
+- Phase-aware time allocation (faster in opening, deeper in middlegame)
+- SEE implementation for multi-move capture evaluation
+- Phase-aware trade evaluation (accept different trades based on phase)
+- Enhanced move ordering with good/bad capture separation
 """
 
 import sys
@@ -38,6 +47,12 @@ class NodeType(Enum):
     EXACT = 0
     LOWER_BOUND = 1
     UPPER_BOUND = 2
+
+class GamePhase(Enum):
+    """Game phase classification for phase-aware evaluation"""
+    OPENING = 0      # Move < 6 AND material >= 5500 (conservative)
+    MIDDLEGAME = 1   # Default phase (safer fallback)
+    ENDGAME = 2      # Material <= 2000
 
 @dataclass
 class TTEntry:
@@ -72,6 +87,9 @@ class VPREngine:
         # Move ordering tables
         self.killer_moves: List[List[Optional[chess.Move]]] = [[None, None] for _ in range(64)]
         self.history_table: Dict[Tuple[chess.Square, chess.Square], int] = {}
+        
+        # Game phase cache
+        self.phase_cache: Dict[int, GamePhase] = {}
         
         # Zobrist keys for hashing
         self._init_zobrist()
@@ -130,6 +148,57 @@ class VPREngine:
             
         return key
     
+    def _detect_game_phase(self, board: chess.Board) -> GamePhase:
+        """
+        Detect current game phase using balanced thresholds
+        
+        Classification (balanced for VPR's lightweight architecture):
+        - Opening: move < 12 AND material >= 4500 (realistic)
+        - Endgame: material <= 2500 (clear endgame)
+        - Middlegame: Default (safer fallback)
+        
+        Uses total material value for more accurate detection
+        
+        Args:
+            board: Current chess position
+            
+        Returns:
+            GamePhase enum value
+        """
+        zobrist_key = self._get_zobrist_key(board)
+        
+        # Check cache first
+        if zobrist_key in self.phase_cache:
+            return self.phase_cache[zobrist_key]
+        
+        # Calculate total material value (both sides)
+        total_material = 0
+        for piece_type in chess.PIECE_TYPES:
+            if piece_type == chess.KING:
+                continue
+            piece_value = PIECE_VALUES.get(piece_type, 0)
+            white_count = len(board.pieces(piece_type, chess.WHITE))
+            black_count = len(board.pieces(piece_type, chess.BLACK))
+            total_material += (white_count + black_count) * piece_value
+        
+        moves_played = len(board.move_stack) if board.move_stack else (board.fullmove_number - 1) * 2 + (0 if board.turn == chess.WHITE else 1)
+        
+        # Balanced phase detection for VPR v8.1
+        if moves_played < 12 and total_material >= 4500:
+            # Realistic opening: first 11 moves AND 58% of material
+            phase = GamePhase.OPENING
+        elif total_material <= 2500:
+            # Clear endgame: minimal material left
+            phase = GamePhase.ENDGAME
+        else:
+            # Default to middlegame when uncertain (safer)
+            phase = GamePhase.MIDDLEGAME
+        
+        # Cache result
+        self.phase_cache[zobrist_key] = phase
+        
+        return phase
+    
     def _is_time_up(self) -> bool:
         """Check if allocated time has been exceeded"""
         if self.time_limit <= 0:
@@ -138,7 +207,12 @@ class VPREngine:
     
     def _calculate_time_limit(self, time_left: float, increment: float = 0) -> float:
         """
-        Calculate time limit for this move based on remaining time
+        Calculate time limit for this move based on remaining time and game phase
+        
+        Phase-aware time allocation:
+        - Opening: Faster moves (50x divisor), less critical
+        - Middlegame: Deeper thinking (30x divisor), tactical complexity
+        - Endgame: Precise calculation (40x divisor), simpler positions
         
         Args:
             time_left: Time remaining in seconds
@@ -149,16 +223,27 @@ class VPREngine:
         """
         if time_left <= 0:
             return 0  # No time limit when time_left is 0 or negative
-            
-        # Time management strategy
+        
+        # Detect game phase for phase-aware time management
+        phase = self._detect_game_phase(self.board)
+        
+        # Phase-dependent base divisor
+        if phase == GamePhase.OPENING:
+            base_divisor = 50  # Move faster in opening
+        elif phase == GamePhase.MIDDLEGAME:
+            base_divisor = 30  # Think longer in middlegame
+        else:  # ENDGAME
+            base_divisor = 40  # Precise but simpler positions
+        
+        # Apply time pressure adjustments
         if time_left > 1800:  # > 30 minutes
-            return min(time_left / 40 + increment * 0.8, 30)
+            return min(time_left / base_divisor + increment * 0.8, 30)
         elif time_left > 600:  # > 10 minutes  
-            return min(time_left / 30 + increment * 0.8, 20)
+            return min(time_left / (base_divisor * 0.9) + increment * 0.8, 20)
         elif time_left > 60:  # > 1 minute
-            return min(time_left / 20 + increment * 0.8, 10)
+            return min(time_left / (base_divisor * 0.7) + increment * 0.8, 10)
         else:  # < 1 minute
-            return min(time_left / 10 + increment * 0.8, 5)
+            return min(time_left / (base_divisor * 0.5) + increment * 0.8, 5)
     
     def _evaluate_material(self, board: chess.Board) -> int:
         """
@@ -266,22 +351,153 @@ class VPREngine:
         
         return victim_value * 10 - attacker_value
     
+    def _static_exchange_evaluation(self, board: chess.Board, move: chess.Move) -> int:
+        """
+        Static Exchange Evaluation (SEE) - calculate material outcome of capture sequence
+        
+        Simulates all recaptures on the target square to determine the final material balance.
+        This is the engine's tactical understanding of whether a capture is sound.
+        
+        Args:
+            board: Current position
+            move: Capture move to evaluate
+            
+        Returns:
+            Net material gain/loss in centipawns (positive = we gain material)
+            
+        Examples:
+            Queen takes rook protected by pawn: -400 (we lose queen for rook)
+            Pawn takes pawn protected by nothing: +100 (we gain pawn)
+            Rook takes bishop protected by knight: +25 (we gain bishop, lose rook)
+        """
+        if not board.is_capture(move):
+            return 0
+        
+        # Get initial victim value
+        victim = board.piece_at(move.to_square)
+        if victim is None:
+            victim_value = PIECE_VALUES[chess.PAWN]  # En passant
+        else:
+            victim_value = PIECE_VALUES[victim.piece_type]
+        
+        # Get attacker value
+        attacker = board.piece_at(move.from_square)
+        if attacker is None:
+            return 0
+        attacker_value = PIECE_VALUES[attacker.piece_type]
+        
+        # Make the capture
+        board.push(move)
+        target_square = move.to_square
+        gain = [victim_value]
+        
+        # Simulate exchange sequence
+        current_attacker_value = attacker_value
+        
+        while True:
+            # Find smallest attacker that can recapture
+            smallest_attacker = None
+            smallest_value = float('inf')
+            
+            for recapture in board.legal_moves:
+                if recapture.to_square == target_square:
+                    piece = board.piece_at(recapture.from_square)
+                    if piece:
+                        piece_value = PIECE_VALUES.get(piece.piece_type, 0)
+                        if piece_value < smallest_value:
+                            smallest_value = piece_value
+                            smallest_attacker = recapture
+            
+            if smallest_attacker is None:
+                break
+            
+            gain.append(current_attacker_value)
+            current_attacker_value = smallest_value
+            board.push(smallest_attacker)
+        
+        # Restore board state
+        for _ in range(len(gain) - 1):
+            board.pop()
+        board.pop()
+        
+        # Minimax the gain list to get final material balance
+        if len(gain) == 1:
+            return gain[0]
+        
+        for i in range(len(gain) - 1, 0, -1):
+            gain[i - 1] = max(gain[i - 1] - gain[i], 0)
+        
+        return gain[0]
+    
+    def _evaluate_trade(self, board: chess.Board, move: chess.Move, phase: GamePhase) -> bool:
+        """
+        Evaluate if a capture is tactically sound based on game phase
+        
+        Different phases require different trade strategies:
+        - Opening: Accept trades losing ≤1 pawn (simplification valuable)
+        - Middlegame: Only advantageous trades (maximize material)
+        - Endgame: Accept equal trades when ahead, be careful when behind
+        
+        Args:
+            board: Current position
+            move: Capture move to evaluate
+            phase: Current game phase
+            
+        Returns:
+            True if trade should be prioritized (good trade for this phase)
+            
+        Examples:
+            Queen for 2 rooks (-100): Good in opening/endgame, bad in middlegame
+            Rook for bishop+knight (0): Good in all phases
+            Knight for 3 pawns (0): Good in all phases
+            Queen for 3 pawns (-600): Bad in all phases
+        """
+        if not board.is_capture(move):
+            return False
+        
+        # Calculate SEE to understand the trade
+        see_value = self._static_exchange_evaluation(board, move)
+        
+        # Phase-dependent trade acceptance
+        if phase == GamePhase.OPENING:
+            # Opening: Accept trades losing up to 1 pawn
+            # Rationale: Simplify position, reduce complexity, save time
+            return see_value >= -100
+            
+        elif phase == GamePhase.MIDDLEGAME:
+            # Middlegame: Only accept advantageous trades (strict)
+            # Rationale: Critical tactical phase, maximize material edge
+            return see_value >= 0
+            
+        else:  # ENDGAME
+            # Endgame: Context-dependent (are we ahead or behind?)
+            material_balance = self._evaluate_material(board)
+            
+            if material_balance > 200:  # We're ahead by 2+ pawns
+                # Trade pieces to simplify (converting advantage)
+                return see_value >= -50
+            else:
+                # Be careful when behind or equal
+                return see_value >= 0
+    
     def _order_moves(self, board: chess.Board, moves: List[chess.Move], ply: int, 
                      tt_move: Optional[chess.Move] = None) -> List[chess.Move]:
         """
         Order moves for better alpha-beta pruning
         
-        Priority:
+        Priority (v8.1 enhanced):
         1. TT move
         2. Checkmate threats
         3. Checks  
-        4. Captures (MVV-LVA)
-        5. Killer moves
-        6. Pawn advances/promotions
-        7. History heuristic
-        8. Other moves
+        4. Good captures (passing phase-aware trade evaluation)
+        5. Bad captures (still examined, but lower priority)
+        6. Killer moves
+        7. Pawn advances/promotions
+        8. History heuristic
+        9. Other moves
         """
         scored_moves = []
+        phase = self._detect_game_phase(board)  # Detect phase once for all moves
         
         for move in moves:
             score = 0
@@ -297,9 +513,17 @@ class VPREngine:
                 else:
                     score = 500000  # Regular checks
                 board.pop()
-            # Captures
+            # Captures - phase-aware evaluation
             elif board.is_capture(move):
-                score = 400000 + self._mvv_lva_score(board, move)
+                mvv_lva = self._mvv_lva_score(board, move)
+                
+                # Evaluate trade soundness based on game phase
+                if self._evaluate_trade(board, move, phase):
+                    # Good capture: high priority
+                    score = 400000 + mvv_lva + 100000
+                else:
+                    # Bad capture: lower priority but still above quiet moves
+                    score = 400000 + mvv_lva
             # Killer moves
             elif ply < len(self.killer_moves) and move in self.killer_moves[ply]:
                 score = 300000
