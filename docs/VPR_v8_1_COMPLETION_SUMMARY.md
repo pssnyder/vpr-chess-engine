@@ -147,12 +147,20 @@ Status:         ✅ PASS
 3. ✅ **Baseline Establishment:** Confirm v8.1 as stable baseline
 
 ### Future Enhancements (v8.2+)
+**Priority 1 - Draw Prevention:**
+- Position repetition detection & avoidance
+- Contempt factor (discourage equal positions)
+- Multi-PV selection (quality-weighted variety)
+
+**Priority 2 - Search Optimizations:**
 - Killer move heuristic
 - History heuristic
 - Null move pruning
 - Late move reductions
 - Aspiration windows
 - Transposition table improvements
+
+**See:** `VPR_v8_2_PLAN.md` for detailed draw prevention roadmap
 
 ---
 

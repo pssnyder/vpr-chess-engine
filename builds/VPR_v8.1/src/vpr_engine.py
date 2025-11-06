@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-VPR Chess Engine v9.0 - C0BR4 Intelligence Port
-A UCI-compatible chess engine porting C0BR4's proven tournament architecture.
+VPR Chess Engine v8.1
+A UCI-compatible chess engine with phase-aware evaluation and tactical intelligence.
 
-Core Philosophy:
-- Port battle-tested C0BR4 heuristics incrementally
-- Keep it simple (between Material Opponent and V7P3R complexity)
-- Focus on decisiveness and forward progress
-- Maintain speed while adding intelligence
+Features:
+- Minimax with alpha-beta pruning
+- Phase-aware move ordering (opening/middlegame/endgame detection)
+- Static Exchange Evaluation (SEE) for intelligent trade decisions
+- Phase-dependent time management
+- Move ordering (MVV-LVA, killer moves, history heuristic)
+- Quiescence search on captures
+- Null move pruning
+- Zobrist transposition table
+- Dynamic bishop pair evaluation
 
-v9.0 Features (C0BR4-inspired):
-- Hierarchical move ordering (MVV-LVA + positional bonuses)
-- Piece-square tables for positional understanding
-- Phase-aware evaluation and time management
-- Static Exchange Evaluation (SEE) for trade intelligence
-- Forward progress encouragement (solves rook shuffling)
-
-C0BR4 Ports in v9.0:
-- Move ordering: Captures (10000+), Promotions (9000+), Checks (500), Center (10), Development (5)
-- Basic piece-square tables (opening/endgame)
-- Positional bonuses for decisive play
+v8.1 Enhancements:
+- Game phase detection (opening/middlegame/endgame)
+- Phase-aware time allocation (faster in opening, deeper in middlegame)
+- SEE implementation for multi-move capture evaluation
+- Phase-aware trade evaluation (accept different trades based on phase)
+- Enhanced move ordering with good/bad capture separation
 """
 
 import sys
@@ -42,166 +42,6 @@ PIECE_VALUES = {
 
 BISHOP_PAIR_BONUS = 50  # Additional value when both bishops present
 BISHOP_ALONE_PENALTY = 50  # Penalty when only one bishop remains
-
-# Piece-Square Tables (C0BR4-style) - values from White's perspective
-# Tables are indexed [rank][file] where rank 0 = rank 1, rank 7 = rank 8
-
-# Pawn PST - encourage center control and advancement
-PST_PAWN_OPENING = [
-    [0,   0,   0,   0,   0,   0,   0,   0],   # Rank 1
-    [50,  50,  50,  50,  50,  50,  50,  50],  # Rank 2
-    [10,  10,  20,  30,  30,  20,  10,  10],  # Rank 3
-    [5,   5,   10,  25,  25,  10,  5,   5],   # Rank 4
-    [0,   0,   0,   20,  20,  0,   0,   0],   # Rank 5
-    [5,   -5,  -10, 0,   0,   -10, -5,  5],   # Rank 6
-    [5,   10,  10,  -20, -20, 10,  10,  5],   # Rank 7
-    [0,   0,   0,   0,   0,   0,   0,   0]    # Rank 8
-]
-
-PST_PAWN_ENDGAME = [
-    [0,   0,   0,   0,   0,   0,   0,   0],   # Rank 1
-    [80,  80,  80,  80,  80,  80,  80,  80],  # Rank 2 - push to promote
-    [50,  50,  50,  50,  50,  50,  50,  50],  # Rank 3
-    [30,  30,  30,  30,  30,  30,  30,  30],  # Rank 4
-    [20,  20,  20,  20,  20,  20,  20,  20],  # Rank 5
-    [10,  10,  10,  10,  10,  10,  10,  10],  # Rank 6
-    [10,  10,  10,  10,  10,  10,  10,  10],  # Rank 7
-    [0,   0,   0,   0,   0,   0,   0,   0]    # Rank 8
-]
-
-# Knight PST - encourage center control and outposts
-PST_KNIGHT_OPENING = [
-    [-50, -40, -30, -30, -30, -30, -40, -50],  # Rank 1
-    [-40, -20, 0,   0,   0,   0,   -20, -40],  # Rank 2
-    [-30, 0,   10,  15,  15,  10,  0,   -30],  # Rank 3
-    [-30, 5,   15,  20,  20,  15,  5,   -30],  # Rank 4
-    [-30, 0,   15,  20,  20,  15,  0,   -30],  # Rank 5
-    [-30, 5,   10,  15,  15,  10,  5,   -30],  # Rank 6
-    [-40, -20, 0,   5,   5,   0,   -20, -40],  # Rank 7
-    [-50, -40, -30, -30, -30, -30, -40, -50]   # Rank 8
-]
-
-PST_KNIGHT_ENDGAME = [
-    [-50, -40, -30, -30, -30, -30, -40, -50],  # Rank 1
-    [-40, -20, 0,   0,   0,   0,   -20, -40],  # Rank 2
-    [-30, 0,   10,  15,  15,  10,  0,   -30],  # Rank 3
-    [-30, 5,   15,  20,  20,  15,  5,   -30],  # Rank 4
-    [-30, 0,   15,  20,  20,  15,  0,   -30],  # Rank 5
-    [-30, 5,   10,  15,  15,  10,  5,   -30],  # Rank 6
-    [-40, -20, 0,   5,   5,   0,   -20, -40],  # Rank 7
-    [-50, -40, -30, -30, -30, -30, -40, -50]   # Rank 8
-]
-
-# Bishop PST - encourage long diagonals and center control
-PST_BISHOP_OPENING = [
-    [-20, -10, -10, -10, -10, -10, -10, -20],  # Rank 1
-    [-10, 0,   0,   0,   0,   0,   0,   -10],  # Rank 2
-    [-10, 0,   5,   10,  10,  5,   0,   -10],  # Rank 3
-    [-10, 5,   5,   10,  10,  5,   5,   -10],  # Rank 4
-    [-10, 0,   10,  10,  10,  10,  0,   -10],  # Rank 5
-    [-10, 10,  10,  10,  10,  10,  10,  -10],  # Rank 6
-    [-10, 5,   0,   0,   0,   0,   5,   -10],  # Rank 7
-    [-20, -10, -10, -10, -10, -10, -10, -20]   # Rank 8
-]
-
-PST_BISHOP_ENDGAME = [
-    [-20, -10, -10, -10, -10, -10, -10, -20],  # Rank 1
-    [-10, 0,   0,   0,   0,   0,   0,   -10],  # Rank 2
-    [-10, 0,   5,   10,  10,  5,   0,   -10],  # Rank 3
-    [-10, 5,   5,   10,  10,  5,   5,   -10],  # Rank 4
-    [-10, 0,   10,  10,  10,  10,  0,   -10],  # Rank 5
-    [-10, 10,  10,  10,  10,  10,  10,  -10],  # Rank 6
-    [-10, 5,   0,   0,   0,   0,   5,   -10],  # Rank 7
-    [-20, -10, -10, -10, -10, -10, -10, -20]   # Rank 8
-]
-
-# Rook PST - encourage open files and 7th rank
-PST_ROOK_OPENING = [
-    [0,   0,   0,   0,   0,   0,   0,   0],    # Rank 1
-    [5,   10,  10,  10,  10,  10,  10,  5],    # Rank 2
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 3
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 4
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 5
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 6
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 7
-    [0,   0,   0,   5,   5,   0,   0,   0]     # Rank 8
-]
-
-PST_ROOK_ENDGAME = [
-    [0,   0,   0,   0,   0,   0,   0,   0],    # Rank 1
-    [5,   10,  10,  10,  10,  10,  10,  5],    # Rank 2
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 3
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 4
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 5
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 6
-    [-5,  0,   0,   0,   0,   0,   0,   -5],   # Rank 7
-    [0,   0,   0,   5,   5,   0,   0,   0]     # Rank 8
-]
-
-# Queen PST - encourage center control but avoid early development
-PST_QUEEN_OPENING = [
-    [-20, -10, -10, -5,  -5,  -10, -10, -20],  # Rank 1
-    [-10, 0,   0,   0,   0,   0,   0,   -10],  # Rank 2
-    [-10, 0,   5,   5,   5,   5,   0,   -10],  # Rank 3
-    [-5,  0,   5,   5,   5,   5,   0,   -5],   # Rank 4
-    [0,   0,   5,   5,   5,   5,   0,   -5],   # Rank 5
-    [-10, 5,   5,   5,   5,   5,   0,   -10],  # Rank 6
-    [-10, 0,   5,   0,   0,   0,   0,   -10],  # Rank 7
-    [-20, -10, -10, -5,  -5,  -10, -10, -20]   # Rank 8
-]
-
-PST_QUEEN_ENDGAME = [
-    [-20, -10, -10, -5,  -5,  -10, -10, -20],  # Rank 1
-    [-10, 0,   0,   0,   0,   0,   0,   -10],  # Rank 2
-    [-10, 0,   5,   5,   5,   5,   0,   -10],  # Rank 3
-    [-5,  0,   5,   5,   5,   5,   0,   -5],   # Rank 4
-    [-5,  0,   5,   5,   5,   5,   0,   -5],   # Rank 5
-    [-10, 0,   5,   5,   5,   5,   0,   -10],  # Rank 6
-    [-10, 0,   0,   0,   0,   0,   0,   -10],  # Rank 7
-    [-20, -10, -10, -5,  -5,  -10, -10, -20]   # Rank 8
-]
-
-# King PST - encourage safety in opening, activity in endgame
-PST_KING_OPENING = [
-    [-30, -40, -40, -50, -50, -40, -40, -30],  # Rank 1
-    [-30, -40, -40, -50, -50, -40, -40, -30],  # Rank 2
-    [-30, -40, -40, -50, -50, -40, -40, -30],  # Rank 3
-    [-30, -40, -40, -50, -50, -40, -40, -30],  # Rank 4
-    [-20, -30, -30, -40, -40, -30, -30, -20],  # Rank 5
-    [-10, -20, -20, -20, -20, -20, -20, -10],  # Rank 6
-    [20,  20,  0,   0,   0,   0,   20,  20],   # Rank 7
-    [20,  30,  10,  0,   0,   10,  30,  20]    # Rank 8 - encourage castling
-]
-
-PST_KING_ENDGAME = [
-    [-50, -40, -30, -20, -20, -30, -40, -50],  # Rank 1 - center in endgame
-    [-30, -20, -10, 0,   0,   -10, -20, -30],  # Rank 2
-    [-30, -10, 20,  30,  30,  20,  -10, -30],  # Rank 3
-    [-30, -10, 30,  40,  40,  30,  -10, -30],  # Rank 4
-    [-30, -10, 30,  40,  40,  30,  -10, -30],  # Rank 5
-    [-30, -10, 20,  30,  30,  20,  -10, -30],  # Rank 6
-    [-30, -30, 0,   0,   0,   0,   -30, -30],  # Rank 7
-    [-50, -30, -30, -30, -30, -30, -30, -50]   # Rank 8
-]
-
-# PST lookup dictionary for easy access
-PST_OPENING = {
-    chess.PAWN: PST_PAWN_OPENING,
-    chess.KNIGHT: PST_KNIGHT_OPENING,
-    chess.BISHOP: PST_BISHOP_OPENING,
-    chess.ROOK: PST_ROOK_OPENING,
-    chess.QUEEN: PST_QUEEN_OPENING,
-    chess.KING: PST_KING_OPENING
-}
-
-PST_ENDGAME = {
-    chess.PAWN: PST_PAWN_ENDGAME,
-    chess.KNIGHT: PST_KNIGHT_ENDGAME,
-    chess.BISHOP: PST_BISHOP_ENDGAME,
-    chess.ROOK: PST_ROOK_ENDGAME,
-    chess.QUEEN: PST_QUEEN_ENDGAME,
-    chess.KING: PST_KING_ENDGAME
-}
 
 class NodeType(Enum):
     EXACT = 0
@@ -451,77 +291,6 @@ class VPREngine:
         
         return score if board.turn == chess.WHITE else -score
     
-    def _evaluate_pst(self, board: chess.Board) -> int:
-        """
-        Evaluate position using piece-square tables (C0BR4-style).
-        
-        Interpolates between opening and endgame PST based on material remaining.
-        This provides positional understanding and solves passive play issues.
-        
-        Returns:
-            PST evaluation score in centipawns (positive = good for white)
-        """
-        # Calculate game phase (0.0 = opening, 1.0 = endgame)
-        total_material = 0
-        for piece_type in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
-            count = len(board.pieces(piece_type, chess.WHITE)) + len(board.pieces(piece_type, chess.BLACK))
-            total_material += count * PIECE_VALUES[piece_type]
-        
-        # Phase interpolation: 7800 = typical opening material, 2000 = endgame threshold
-        phase = 1.0 - min(1.0, max(0.0, (total_material - 2000) / 5800))
-        
-        score = 0
-        
-        # Evaluate all pieces on the board
-        for square in chess.SQUARES:
-            piece = board.piece_at(square)
-            if piece is None or piece.piece_type == chess.KING:
-                continue
-            
-            # Get rank and file (0-7 indexed)
-            rank = chess.square_rank(square)
-            file = chess.square_file(square)
-            
-            # For black pieces, mirror the rank (black's rank 1 = index 7)
-            if piece.color == chess.BLACK:
-                rank = 7 - rank
-            
-            # Get opening and endgame values
-            pst_opening = PST_OPENING.get(piece.piece_type, [[0]*8 for _ in range(8)])
-            pst_endgame = PST_ENDGAME.get(piece.piece_type, [[0]*8 for _ in range(8)])
-            
-            opening_value = pst_opening[rank][file]
-            endgame_value = pst_endgame[rank][file]
-            
-            # Interpolate between opening and endgame
-            pst_value = int(opening_value * (1.0 - phase) + endgame_value * phase)
-            
-            # Add to score (positive for white, negative for black)
-            if piece.color == chess.WHITE:
-                score += pst_value
-            else:
-                score -= pst_value
-        
-        return score if board.turn == chess.WHITE else -score
-    
-    def _evaluate(self, board: chess.Board) -> int:
-        """
-        Complete position evaluation (C0BR4-style).
-        
-        Combines material and positional understanding for better play.
-        This is the main evaluation function called by search.
-        
-        Returns:
-            Total evaluation score in centipawns (positive = good for side to move)
-        """
-        material_score = self._evaluate_material(board)
-        pst_score = self._evaluate_pst(board)
-        
-        # Combine material and positional scores
-        total_score = material_score + pst_score
-        
-        return total_score
-    
     def _quiescence_search(self, board: chess.Board, alpha: float, beta: float, depth: int = 0) -> float:
         """
         Quiescence search to avoid horizon effect on captures
@@ -536,10 +305,10 @@ class VPREngine:
             Evaluation score
         """
         if self._is_time_up() or depth > 8:  # Limit quiescence depth
-            return self._evaluate(board)
+            return self._evaluate_material(board)
             
         self.nodes_searched += 1
-        stand_pat = self._evaluate(board)
+        stand_pat = self._evaluate_material(board)
         
         if stand_pat >= beta:
             return beta
@@ -712,83 +481,73 @@ class VPREngine:
                 return see_value >= 0
     
     def _order_moves(self, board: chess.Board, moves: List[chess.Move], ply: int, 
-                    tt_move: Optional[chess.Move] = None) -> List[chess.Move]:
+                     tt_move: Optional[chess.Move] = None) -> List[chess.Move]:
         """
-        Order moves for better alpha-beta pruning (C0BR4-style hierarchy)
+        Order moves for better alpha-beta pruning
         
-        Priority (v9.0 - C0BR4 port):
-        1. TT move (1,000,000)
-        2. Captures via MVV-LVA (10,000 + victim - attacker)
-        3. Promotions (9,000 + promoted piece value)
-        4. Checks (500)
-        5. Center control (10)
-        6. Development (5)
-        7. History heuristic (variable)
-        
-        This simpler hierarchy encourages forward play and solves rook shuffling.
+        Priority (v8.1 enhanced):
+        1. TT move
+        2. Checkmate threats
+        3. Checks  
+        4. Good captures (passing phase-aware trade evaluation)
+        5. Bad captures (still examined, but lower priority)
+        6. Killer moves
+        7. Pawn advances/promotions
+        8. History heuristic
+        9. Other moves
         """
         scored_moves = []
+        phase = self._detect_game_phase(board)  # Detect phase once for all moves
         
         for move in moves:
+            score = 0
+            
             # TT move gets highest priority
             if tt_move and move == tt_move:
                 score = 1000000
+            # Checkmate threats
+            elif board.gives_check(move):
+                board.push(move)
+                if board.is_checkmate():
+                    score = 900000
+                else:
+                    score = 500000  # Regular checks
+                board.pop()
+            # Captures - phase-aware evaluation
+            elif board.is_capture(move):
+                mvv_lva = self._mvv_lva_score(board, move)
+                
+                # Evaluate trade soundness based on game phase
+                if self._evaluate_trade(board, move, phase):
+                    # Good capture: high priority
+                    score = 400000 + mvv_lva + 100000
+                else:
+                    # Bad capture: lower priority but still above quiet moves
+                    score = 400000 + mvv_lva
+            # Killer moves
+            elif ply < len(self.killer_moves) and move in self.killer_moves[ply]:
+                score = 300000
+            # Pawn promotions
+            elif move.promotion:
+                score = 200000 + PIECE_VALUES.get(move.promotion, 0)
+            # Pawn advances (towards 7th/2nd rank)
             else:
-                score = self._score_move_c0br4_style(board, move, ply)
+                piece = board.piece_at(move.from_square)
+                if piece and piece.piece_type == chess.PAWN:
+                    to_rank = chess.square_rank(move.to_square)
+                    if board.turn == chess.WHITE and to_rank >= 5:
+                        score = 100000 + to_rank * 1000
+                    elif board.turn == chess.BLACK and to_rank <= 2:
+                        score = 100000 + (7 - to_rank) * 1000
+                else:
+                    # History heuristic for other moves
+                    key = (move.from_square, move.to_square)
+                    score = self.history_table.get(key, 0)
                 
             scored_moves.append((score, move))
         
         scored_moves.sort(key=lambda x: x[0], reverse=True)
         return [move for _, move in scored_moves]
-    
-    def _score_move_c0br4_style(self, board: chess.Board, move: chess.Move, ply: int) -> int:
-        """
-        Score a move using C0BR4's proven hierarchy.
-        
-        This method implements the exact move ordering that makes C0BR4 successful:
-        - Captures valued by MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
-        - Promotions highly valued (just below captures)
-        - Checks get tactical priority
-        - Small bonuses for center control and development (prevents shuffling)
-        """
-        # Captures: MVV-LVA scoring (10,000 + victim_value - attacker_value)
-        if board.is_capture(move):
-            victim = board.piece_at(move.to_square)
-            attacker = board.piece_at(move.from_square)
-            
-            victim_value = PIECE_VALUES.get(victim.piece_type, 0) if victim else 0
-            attacker_value = PIECE_VALUES.get(attacker.piece_type, 0) if attacker else 100
-            
-            return 10000 + victim_value - attacker_value
-        
-        # Promotions: High value (9,000 + piece value)
-        if move.promotion:
-            return 9000 + PIECE_VALUES.get(move.promotion, 0)
-        
-        # Checks: Tactical priority
-        if board.gives_check(move):
-            return 500
-        
-        # Positional bonuses (center control, development)
-        score = 0
-        
-        # Center control bonus (e4, d4, e5, d5 for white; similar for black)
-        center_squares = [chess.E4, chess.D4, chess.E5, chess.D5]
-        if move.to_square in center_squares:
-            score += 10
-        
-        # Development bonus (moving pieces from back rank)
-        from_rank = chess.square_rank(move.from_square)
-        if board.turn == chess.WHITE and from_rank == 0:
-            score += 5
-        elif board.turn == chess.BLACK and from_rank == 7:
-            score += 5
-        
-        # History heuristic for remaining moves
-        key = (move.from_square, move.to_square)
-        score += self.history_table.get(key, 0)
-        
-        return score
     
     def _update_killer_moves(self, move: chess.Move, ply: int):
         """Update killer moves table"""
@@ -847,7 +606,7 @@ class VPREngine:
             Tuple of (evaluation, best_move)
         """
         if self._is_time_up():
-            return self._evaluate(board), None
+            return self._evaluate_material(board), None
             
         # Check for terminal nodes
         if board.is_game_over():
@@ -870,7 +629,7 @@ class VPREngine:
         
         # Null move pruning
         if (do_null_move and depth >= 3 and not board.is_check() and 
-            self._evaluate(board) >= beta):
+            self._evaluate_material(board) >= beta):
             
             board.push(chess.Move.null())
             null_score, _ = self._search(board, depth - 3, -beta, -beta + 1, ply + 1, False)
@@ -883,7 +642,7 @@ class VPREngine:
         # Generate and order moves
         legal_moves = list(board.legal_moves)
         if not legal_moves:
-            return self._evaluate(board), None
+            return self._evaluate_material(board), None
             
         ordered_moves = self._order_moves(board, legal_moves, ply, tt_move)
         best_move = None
@@ -1033,7 +792,7 @@ class UCIInterface:
                     continue
                     
                 if line == "uci":
-                    print("id name VPR v8.0")
+                    print("id name VPR v8.1")
                     print("id author Pat Snyder")
                     print("option name MaxDepth type spin default 6 min 1 max 20")
                     print("option name TTSize type spin default 128 min 16 max 1024")
